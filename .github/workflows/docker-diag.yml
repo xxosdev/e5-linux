@@ -1,0 +1,90 @@
+# =============================================================================
+# 临时诊断：为什么 amd64（QEMU 模拟）容器里 apt-get update 失败
+#
+# 背景：openwrt/block-mount.Dockerfile 的 FROM ubuntu:22.04 + apt-get update 在
+# ARM64 runner 上（--platform linux/amd64，QEMU 模拟）失败：
+#   The key(s) in the keyring /etc/apt/trusted.gpg.d/ubuntu-keyring-2012-cdimage.gpg
+#   are ignored as the file has an unsupported filetype.
+# 该信息来自 /usr/bin/apt-key 的 is_supported_keyring()：它要求 .gpg 密钥环首字节
+# 为 0x98/0x99/0xC6（printf '\231' | cmp -s -n 1 - FILE）。
+# 本地核对：镜像层里的文件首字节确为 0x99，判断逻辑本身通过。因此需要实据。
+#
+# 这个 workflow 只跑几秒~1 分钟，用来定位根因并顺便验证候选修复。
+# 定位后本文件即可删除。
+# =============================================================================
+name: Docker diagnosis (temporary)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - name: Container state and the exact apt-key failure
+        continue-on-error: true
+        run: |
+          docker run --rm --platform linux/amd64 ubuntu:22.04 sh -euc '
+            echo "== arch / id / PATH =="
+            uname -m; id; echo "PATH=$PATH"
+            echo "== keyring files =="
+            ls -la /etc/apt/trusted.gpg.d/ 2>&1
+            ls -la /etc/apt/trusted.gpg 2>&1 || true
+            echo "== first bytes =="
+            for f in /etc/apt/trusted.gpg.d/*; do printf "%s: " "$f"; od -An -tx1 -N4 "$f"; done
+            echo "== apt-key first-byte test =="
+            for f in /etc/apt/trusted.gpg.d/*.gpg; do
+              printf "%s -> " "$f"
+              if printf "\231" | cmp -s -n 1 - "$f"; then echo MATCH; else echo "NOMATCH(rc=$?)"; fi
+            done
+            echo "== tools =="
+            command -v cmp; command -v printf; command -v apt-key; ls -l /bin/sh
+            echo "== shell trace of apt-key list (the interesting lines) =="
+            sh -x /usr/bin/apt-key list 2>&1 | grep -n "cmp \|is_supported\|printf\|unsupported\|ignored as\|not readable" | head -30
+            echo "== the same trace as user _apt (apt drops privileges before apt-key) =="
+            setpriv --reuid=_apt --regid=_apt --clear-groups sh -x /usr/bin/apt-key list 2>&1 | grep -n "cmp \|is_supported\|unsupported\|ignored as\|not readable\|Permission" | head -30
+            echo "== plain apt-get update =="
+            apt-get update 2>&1 | tail -6 || true
+          ' 2>&1 | tail -70
+
+      - name: Probe A - does an older dated image work?
+        continue-on-error: true
+        run: |
+          echo "### ubuntu:jammy-20260901.2"
+          docker run --rm --platform linux/amd64 ubuntu:jammy-20260901.2 sh -euc '
+            for f in /etc/apt/trusted.gpg.d/*; do printf "%s: " "$f"; od -An -tx1 -N4 "$f"; done
+            apt-get update 2>&1 | tail -4
+            echo "rc=$?"
+          ' 2>&1 | tail -20
+
+      - name: Probe B - does the native arm64 image work (isolates QEMU)?
+        continue-on-error: true
+        run: |
+          echo "### ubuntu:22.04 as linux/arm64 (native on this runner)"
+          docker run --rm --platform linux/arm64 ubuntu:22.04 sh -euc '
+            uname -m
+            for f in /etc/apt/trusted.gpg.d/*; do printf "%s: " "$f"; od -An -tx1 -N4 "$f"; done
+            apt-get update 2>&1 | tail -4
+          ' 2>&1 | tail -20
+
+      - name: Probe C - does allowing insecure repositories let the build through?
+        continue-on-error: true
+        run: |
+          echo "### ubuntu:22.04 amd64 with Acquire::AllowInsecureRepositories"
+          docker run --rm --platform linux/amd64 ubuntu:22.04 sh -euc '
+            printf "%s\n" "Acquire::AllowInsecureRepositories \"true\";" "APT::Get::AllowUnauthenticated \"true\";" > /etc/apt/apt.conf.d/99-diag
+            apt-get update 2>&1 | tail -6
+            echo "update rc=$?"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates >/dev/null 2>&1
+            echo "install rc=$?"
+          ' 2>&1 | tail -20
+
+      - name: Probe D - reproduce the Dockerfile build
+        continue-on-error: true
+        run: |
+          printf 'FROM ubuntu:22.04\nRUN apt-get update && echo UPDATE-OK\n' > /tmp/diag.Dockerfile
+          docker build -f /tmp/diag.Dockerfile /tmp 2>&1 | tail -8
