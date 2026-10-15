@@ -1,0 +1,68 @@
+# =============================================================================
+# 轻量检查：push / PR 时快速验证设备仓库布局与纯本地逻辑
+#
+# 定位：不做镜像编译，不需要 bootstrap 归档、不需要 ARM runner。
+#       完整编译与发布见 openwrt-release.yml。
+# 覆盖：shell 语法、overlay 合成顺序、SD 注册表选择、Magisk 启动控制、
+#       CI 输入/发布门禁、OpenWrt 包状态记录。
+# 说明：这些检查在 x86 runner 上跑；涉及设备/权限的断言在 Linux 上通过
+#       （Windows 检出会因 CRLF 与可执行位差异误报）。
+# =============================================================================
+name: PR checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Shell syntax
+        run: |
+          bash -n \
+            upstream/build.sh \
+            openwrt/build-rootfs.sh \
+            openwrt/make-flash-bundle.sh \
+            openwrt/build-modemmanager.sh \
+            openwrt/build-bluez.sh \
+            openwrt/build-block-mount.sh \
+            openwrt/install-standalone.sh \
+            openwrt/device-install.sh \
+            openwrt/device-install-image.sh \
+            magisk/build.sh \
+            boot/flash-trial.sh \
+            boot/flash-from-linux.sh \
+            boot/install-rootfs.sh \
+            tools/sync-device-repos.sh
+          sh -n openwrt/bundle/flash.sh
+      - name: Device repository layout
+        run: |
+          python3 tools/device-layout.py check --system openwrt --model e5
+          python3 tools/device-layout.py check --system openwrt --model t551m
+          python3 tools/device-layout.py check --system openwrt --model m8
+          python3 tools/device-layout.py check --system debian --model e5
+      - name: Overlay, registry and release gates
+        run: |
+          python3 tools/tests/device-layout.py
+          python3 rootfs/tests/sd-registry.py
+          python3 magisk/tests.py
+          python3 tools/tests/ci-release.py
+          python3 tools/tests/openwrt-package-state.py
+      - name: Infoscreen plugin checks
+        run: python3 ci/infoscreen-plugins/tools/check.py
