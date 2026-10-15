@@ -25,6 +25,14 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
+      # Without this the amd64 container cannot even exec ("exec format error"):
+      # the emulation the release workflow relies on comes from here.
+      - name: Install host tools (same as the release workflow)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-x86_64
+
       - name: Container state and the exact apt-key failure
         continue-on-error: true
         run: |
