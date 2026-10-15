@@ -91,6 +91,27 @@ jobs:
             echo "install rc=$?"
           ' 2>&1 | tail -20
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Probe E - does the patched Dockerfile build? (candidate fix)
+        continue-on-error: true
+        run: |
+          cp openwrt/block-mount.Dockerfile /tmp/bm.Dockerfile
+          sed -i '1a RUN sed -i "s/^deb /deb [trusted=yes] /" /etc/apt/sources.list' /tmp/bm.Dockerfile
+          echo "=== patched Dockerfile ==="
+          cat /tmp/bm.Dockerfile
+          echo "=== building (this is the step that fails today) ==="
+          docker build --platform linux/amd64 -t bm-probe -f /tmp/bm.Dockerfile /tmp 2>&1 | tail -12
+          echo "=== tools present in the result? ==="
+          docker run --rm --platform linux/amd64 bm-probe sh -c 'gcc --version | head -1; python3 -V; command -v zstd unzip rsync gawk patch'
+
+      - name: Probe F - confirm the unpatched Dockerfile still fails
+        continue-on-error: true
+        run: |
+          docker build --platform linux/amd64 -t bm-probe-baseline -f openwrt/block-mount.Dockerfile /tmp 2>&1 | tail -6
+
       - name: Probe D - reproduce the Dockerfile build
         continue-on-error: true
         run: |
