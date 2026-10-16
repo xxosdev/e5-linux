@@ -230,6 +230,13 @@ jobs:
                 ci/infoscreen/tests/network-checks.sh
             E5_TEST_IMAGE="e5-openwrt-base:$E5_WRT_VER" bash ci/infoscreen/tests/network-checks.sh
             python3 ci/infoscreen/tests/usb-reset.py
+            # Undo the edits above now that they have been used. They live inside
+            # the infoscreen submodule, and a modified submodule worktree makes the
+            # top-level `git describe --always --dirty` in make-flash-bundle.sh
+            # report the tree as dirty -- which would name every published archive
+            # "...-<sha>-dirty" even though nothing in the repository changed.
+            git -C ci/infoscreen checkout -- tests/
+            echo "release revision: $(git describe --always --dirty)"
           fi
       - name: Build ARM64 toolchain container
         run: docker build -t e5-mainline-build upstream/
