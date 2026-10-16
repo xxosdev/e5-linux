@@ -76,15 +76,26 @@ jobs:
   # tar/find/bash/patch/diffutils/awk/grep) and its host xargs/grep/awk dying with
   # "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}". Building here also keeps the
   # APK byte-identical to the one upstream's workflow produces.
-  block-apk:
+  native-apks:
+    # Both APKs below are built by an OpenWrt SDK host, i.e. x86_64 binaries. On
+    # the ARM64 runner they can only run under QEMU, and there the emulated x86_64
+    # tools crash: run 38691881633 shows the SDK's own grep, awk and xargs dying
+    # with "QEMU internal SIGSEGV {code=MAPERR, addr=0x20}", after cmp had already
+    # broken apt-key and with it apt-get update. Build them natively here and hand
+    # the verified caches to the ARM job, where build-block-mount.sh and
+    # build-hostapd.sh recognise them and return before starting Docker.
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: e5-linux
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          repository: ${{ github.repository }}
+          # Match the ARM job's checkout: both jobs must read the same tree, or the
+          # build-id stamps would differ and the APKs would be rebuilt there.
+          ref: ${{ inputs.source_ref || vars.E5_SOURCE_REF || github.ref }}
           path: e5-linux
           persist-credentials: false
       - name: Cache guarded block-mount APK
@@ -101,9 +112,23 @@ jobs:
           path: e5-linux/out/openwrt/block-mount-guarded.apk*
           compression-level: 0
           if-no-files-found: error
+      - name: Cache the Unisoc WPA3 APKs
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: e5-linux/work/wifi-sae
+          key: guarded-wifi-sae-x86_64-${{ env.E5_WRT_VER }}-${{ hashFiles('e5-linux/openwrt/build-hostapd*.sh', 'e5-linux/openwrt/hostapd.Dockerfile', 'e5-linux/openwrt/patch-hostapd-sae.py', 'e5-linux/openwrt/hostapd-unisoc*', 'e5-linux/openwrt/wifi-sae-state.py') }}
+      - name: Build the Unisoc WPA3 APKs
+        run: UNISOC_WRT_VER="$E5_WRT_VER" sh openwrt/build-hostapd.sh
+      - name: Upload the Unisoc WPA3 APKs for the ARM job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guarded-wifi-sae
+          path: e5-linux/work/wifi-sae
+          compression-level: 0
+          if-no-files-found: error
 
   build:
-    needs: block-apk
+    needs: native-apks
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     defaults:
@@ -272,15 +297,31 @@ jobs:
         with:
           name: guarded-block-apk
           path: e5-linux/out/openwrt
+      - name: Take the Unisoc WPA3 APKs from the x86_64 job
+        # build-rootfs.sh calls build-hostapd.sh with work/wifi-sae as its output
+        # directory, so restoring the verified cache there makes it return without
+        # starting Docker -- the same trick the block-mount APK above uses.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: guarded-wifi-sae
+          path: e5-linux/work/wifi-sae
+      - name: Verify the Unisoc WPA3 APK cache
+        run: |
+          # Fail here rather than inside build-rootfs.sh, where a missing cache
+          # would send the build back to the emulated x86_64 Docker path.
+          test -s work/wifi-sae/build-id ||
+            { echo '::error::the native-apks job did not deliver the WPA3 APKs'; exit 1; }
+          python3 openwrt/wifi-sae-state.py work/wifi-sae >/dev/null
+          echo 'Unisoc WPA3: verified APK cache'
       - name: Build and test guarded block-mount
         run: |
-          # The APK, its build-id and its checksum arrive from the block-apk job,
+          # The APK, its build-id and its checksum arrive from the native-apks job,
           # which builds them on a native x86_64 runner; build-block-mount.sh
           # recognises that verified cache and returns without starting Docker.
           # The Dockerfile is left untouched on purpose: editing it here would
           # change the stamp the other job recorded and invalidate the APK.
           test -s out/openwrt/block-mount-guarded.apk ||
-            { echo '::error::the block-apk job did not deliver the guarded APK'; exit 1; }
+            { echo '::error::the native-apks job did not deliver the guarded APK'; exit 1; }
           sh openwrt/build-block-mount.sh
           E5_TEST_IMAGE="e5-openwrt-base:$E5_WRT_VER" E5_TEST_BLOCK_APK="$PWD/out/openwrt/block-mount-guarded.apk" python3 device/openwrt_device_common/tests/block-probe.py
           docker run --rm -v "$PWD:/src:ro" "e5-openwrt-base:$E5_WRT_VER" sh -ec 'apk add -q ucode-mod-uci; ucode -L "/src/device/openwrt_device_common/luci-app-t551m/root/usr/libexec/unisoc-modem/*.uc" /src/device/openwrt_device_common/tests/apn.uc'
