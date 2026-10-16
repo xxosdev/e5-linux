@@ -85,7 +85,7 @@ jobs:
     # the verified caches to the ARM job, where build-block-mount.sh and
     # build-hostapd.sh recognise them and return before starting Docker.
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     defaults:
       run:
         working-directory: e5-linux
@@ -118,7 +118,40 @@ jobs:
           path: e5-linux/work/wifi-sae
           key: guarded-wifi-sae-x86_64-${{ env.E5_WRT_VER }}-${{ hashFiles('e5-linux/openwrt/build-hostapd*.sh', 'e5-linux/openwrt/hostapd.Dockerfile', 'e5-linux/openwrt/patch-hostapd-sae.py', 'e5-linux/openwrt/hostapd-unisoc*', 'e5-linux/openwrt/wifi-sae-state.py') }}
       - name: Build the Unisoc WPA3 APKs
-        run: UNISOC_WRT_VER="$E5_WRT_VER" sh openwrt/build-hostapd.sh
+        run: |
+          # build-hostapd-inner.sh builds from an OpenWrt source tree, but jumps
+          # straight to `make package/.../compile`, which does not build the host
+          # tools or the cross toolchain -- only `make world`, or an explicit
+          # tools/install + toolchain/install, does. Without them the tree has no
+          # staging_dir/host/bin/openssl or libdeflate-gzip, so unpacking lua fails
+          # with "does not look like a tar archive" (exit 2) before hostapd is even
+          # reached. Upstream has not seen this because it has not run CI since the
+          # script landed.
+          #
+          # Prepare the shared build volume here, in the same image and the same
+          # volume build-hostapd.sh uses, instead of patching the script: it hashes
+          # build-hostapd-inner.sh into its build-id, so a patched copy here would
+          # need a byte-identical patch in the ARM job, and there it would also
+          # make `git describe --dirty` name every published archive "-dirty".
+          docker build --platform linux/amd64 -t unisoc-hostapd-build \
+              -f openwrt/hostapd.Dockerfile openwrt
+          docker run --rm --platform linux/amd64 \
+              -v e5-openwrt-src:/build -v "$PWD/openwrt:/src:ro" \
+              -e "VER=$E5_WRT_VER" -e "JOBS=$(nproc)" \
+              unisoc-hostapd-build sh -euc '
+                  cd /build
+                  [ -d openwrt/.git ] || git clone -q --depth 1 --branch "v$VER" \
+                      https://git.openwrt.org/openwrt/openwrt.git openwrt
+                  cd openwrt
+                  [ -s .config ] || printf "%s\n" CONFIG_TARGET_armsr=y \
+                      CONFIG_TARGET_armsr_armv8=y \
+                      CONFIG_TARGET_armsr_armv8_DEVICE_generic=y \
+                      CONFIG_ALL_KMODS=n CONFIG_ALL_NONSHARED=n > .config
+                  make defconfig
+                  make -j"$JOBS" tools/install
+                  make -j"$JOBS" toolchain/install
+              '
+          UNISOC_WRT_VER="$E5_WRT_VER" sh openwrt/build-hostapd.sh
       - name: Upload the Unisoc WPA3 APKs for the ARM job
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
