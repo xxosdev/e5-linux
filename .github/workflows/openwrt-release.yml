@@ -139,6 +139,10 @@ jobs:
               -v e5-openwrt-src:/build -v "$PWD/openwrt:/src:ro" \
               -e "VER=$E5_WRT_VER" -e "JOBS=$(nproc)" \
               unisoc-hostapd-build sh -euc '
+                  # build-hostapd-inner.sh exports this too: the containers run as
+                  # root, and autotools packages such as tools/tar refuse to
+                  # configure without it.
+                  export FORCE_UNSAFE_CONFIGURE=1
                   cd /build
                   [ -d openwrt/.git ] || git clone -q --depth 1 --branch "v$VER" \
                       https://git.openwrt.org/openwrt/openwrt.git openwrt
@@ -148,8 +152,12 @@ jobs:
                       CONFIG_TARGET_armsr_armv8_DEVICE_generic=y \
                       CONFIG_ALL_KMODS=n CONFIG_ALL_NONSHARED=n > .config
                   make defconfig
-                  make -j"$JOBS" tools/install
-                  make -j"$JOBS" toolchain/install
+                  # -j hides which package failed, so on failure re-run serially
+                  # with V=s to make the reason visible in the log.
+                  make -j"$JOBS" tools/install ||
+                      { make -j1 tools/install V=s; exit 1; }
+                  make -j"$JOBS" toolchain/install ||
+                      { make -j1 toolchain/install V=s; exit 1; }
               '
           UNISOC_WRT_VER="$E5_WRT_VER" sh openwrt/build-hostapd.sh
       - name: Upload the Unisoc WPA3 APKs for the ARM job
