@@ -11,3 +11,10 @@ installer/screenshots/*.png binary
 # including its end, so a CRLF checkout makes every entry miss and the build
 # stops on the options it was meant to allow.  Pin it to LF in every checkout.
 upstream/config-ignored.txt text eol=lf
+
+# These two were committed with CRLF ends on a core.autocrlf=true checkout,
+# while upstream keeps them in LF.  Every sync then rewrote the whole file
+# instead of merging the changed lines, so the diff said nothing about what
+# actually moved.  Store them the way upstream does.
+.github/workflows/gui.yml text eol=lf
+.github/workflows/release.yml text eol=lf
