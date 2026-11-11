@@ -132,6 +132,15 @@ jobs:
 
   build:
     needs: [gui, gui_macos, native-apks]
+    # The macOS and Windows installers are inputs to the bundle, not to the
+    # kernel or the OpenWrt image, but `needs` treats a cancelled macOS job
+    # exactly like a failed one and skips everything below.  A cancelled job
+    # here means the macOS pool handed out no machine at all -- no step ran --
+    # which says nothing about this commit.  always() lets the build start and
+    # prove the parts that do not need an installer; the artifact downloads
+    # below are the only steps allowed to come up empty, and the bundle step
+    # still refuses to produce a release without them.
+    if: always() && needs.gui.result == 'success' && needs.native-apks.result == 'success'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 360
     outputs:
@@ -317,17 +326,29 @@ jobs:
           sh openwrt/build-block-mount.sh
           E5_TEST_IMAGE="e5-openwrt-base:$E5_WRT_VER" E5_TEST_BLOCK_APK="$PWD/out/openwrt/block-mount-guarded.apk" python3 openwrt/tests/block-probe.py
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: openwrt-installer-windows
           path: installer/artifacts/windows
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: openwrt-installer-macos-arm64
           path: ${{ runner.temp }}/installer-macos
       - name: Restore native macOS artifact
         run: |
+          shopt -s nullglob
+          archives=("$RUNNER_TEMP"/installer-macos/*.tar.gz)
+          if [ ${#archives[@]} -eq 0 ]; then
+            # The macOS pool can hand out no machine at all; that cancels the
+            # gui_macos job before its first step and leaves no artifact.  Do
+            # not fake an installer: leave the variable unset so the bundle
+            # step below fails with its own message about the missing input.
+            echo "::warning::No macOS installer artifact; the release bundle cannot be built in this run"
+            exit 0
+          fi
           mkdir -p installer/artifacts/macos-arm64
-          tar -xzf "$RUNNER_TEMP/installer-macos/openwrt-installer-macos-arm64.tar.gz" -C installer/artifacts/macos-arm64
+          tar -xzf "${archives[0]}" -C installer/artifacts/macos-arm64
           echo "OPENWRT_GUI_MACOS_ARTIFACT=$GITHUB_WORKSPACE/installer/artifacts/macos-arm64" >> "$GITHUB_ENV"
       - name: Assemble the generic mainline flash bundles
         env:
