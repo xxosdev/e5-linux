@@ -10,7 +10,19 @@ TOP=Path(__file__).resolve().parents[2]
 source=(TOP/'boot/init').read_text()
 function=source[source.index('early_card_firmware() {'):source.index('\nearly_device_firmware() {')]
 assert '-o ro,noload,noatime' in function
-assert source.index('[ "$module" = wcn_bsp.ko ] && early_device_firmware') < source.index('insmod "/linux-modules/$module"')
+# wcn_bsp's firmware has to be in place before the module is loaded. The guard
+# started as a direct test of the module name; it became a case statement when
+# st7123 (and later axs15205) needed the same firmware before probe, so read the
+# module pass and accept either form, as long as wcn_bsp is covered before insmod.
+start=source.index('while read module; do')
+loop=source[start:source.index('done < /etc/module-order', start)]
+pass_at=loop.index('insmod "/linux-modules/$module"')
+arms=[a for a in ('[ "$module" = wcn_bsp.ko ] && early_device_firmware',
+                  'st7123.ko|wcn_bsp.ko) early_device_firmware ;;',
+                  'st7123.ko|axs15205.ko|wcn_bsp.ko) early_device_firmware ;;')
+      if a in loop]
+assert len(arms)==1,'boot/init: expected one guard that runs early_device_firmware for wcn_bsp, found %d' % len(arms)
+assert loop.index(arms[0]) < pass_at,'boot/init: wcn_bsp firmware is read after the module pass insmods it'
 with tempfile.TemporaryDirectory(prefix='e5-early-fw-') as directory:
     root=Path(directory)
     for path in ['sys/mmcblk0','sys/mmcblk1','dev','card/lib/firmware','card/etc/e5','card/sbin','bin','firmware']:
