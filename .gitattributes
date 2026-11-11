@@ -6,3 +6,8 @@ devices/m8/port/** -text -whitespace
 installer/** text=auto eol=lf
 installer/ui/src-tauri/icons/*.ico binary
 installer/screenshots/*.png binary
+
+# The kernel build reads this with `grep -qx`, which matches the whole line
+# including its end, so a CRLF checkout makes every entry miss and the build
+# stops on the options it was meant to allow.  Pin it to LF in every checkout.
+upstream/config-ignored.txt text eol=lf

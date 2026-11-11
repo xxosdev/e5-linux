@@ -1,0 +1,26 @@
+# Options e5-mainline.config asks for that Kconfig does not take, so the build
+# in build.sh (and build-native.sh) does not stop on them.  One symbol per line,
+# matched exactly by `grep -qx` against `CONFIG_x` entries, so a comment or an
+# assignment here is inert.  Anything not listed still stops the build: a
+# silently dropped option has cost a working feature before.
+#
+# Every entry below is one that has never been in the kernel this builds, so
+# listing it changes nothing in the image -- it only stops the check from
+# failing on a config line that never had an effect.  Re-check each one when
+# the kernel tag moves, and remove it once the option does take.
+#
+# CONFIG_UCLAMP_TASK, CONFIG_UCLAMP_TASK_GROUP (33f8a7379, 2026-10-23)
+#   depend on CPU_FREQ_GOV_SCHEDUTIL, which needs CPU_FREQ && SMP
+#   (init/Kconfig, drivers/cpufreq/Kconfig).  e5-mainline.config never asks for
+#   CONFIG_CPU_FREQ, so the governor is not visible, olddefconfig drops the
+#   clamping options, and neither has ever been compiled in.  Enabling them
+#   means enabling the cpufreq subsystem first, which changes power behaviour
+#   and needs a device run before it can be trusted.
+CONFIG_UCLAMP_TASK
+CONFIG_UCLAMP_TASK_GROUP
+# CONFIG_UMS9620_LPINTC (33f8a7379)
+#   no such symbol in the kernel at e5-6.18 (b93bbc3a3): drivers/irqchip has no
+#   Unisoc low-power interrupt controller, and no Kconfig declares it.  The
+#   config line asks for a driver that is not there (a porting leftover), so
+#   nothing can be built from it.
+CONFIG_UMS9620_LPINTC
